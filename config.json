@@ -1,0 +1,58 @@
+{
+  "Sensor": {
+	"vnir": {
+		"id": "VNIR_1800_SN00840",
+		"fov": 34,
+		"ifov": [0.32, 0.64],
+		"bands": 186,
+		"samples": 1800
+	},
+	"swir": {
+		"id": "SWIR_384_SN3142",
+		"fov": 32,
+		"ifov": [1.46, 1.46],
+		"bands": 288,
+		"samples": 384
+	}
+  },
+  
+  "Data": {
+    "input_dir": "/media/nanfeng/My Passport/Hyspex/Image",
+	"output_dir": "/home/nanfeng/Documents/HyspexPro/Results"
+  },
+  
+  "Radiometric_Calibration": {
+	"setting_file": {
+		"vnir": "/media/nanfeng/My Passport/Hyspex/VNIR_1800_SN00840_FoVx2_2019-06-05T220151.set",
+		"swir": "/media/nanfeng/My Passport/Hyspex/SWIR_384_SN3142_FoVx2_2019-06-05T220237.set"
+		}
+  },
+  
+  "Atmospheric_Correction": {
+	"atm_database": null,
+	"rtm_params": {
+		"install_dir": "/home/nanfeng/Documents/libRadtran", 
+		"resolution": "coarse", 
+		"atm_mode": "midlatitude_summer", 
+		"cpu_count": 4
+		},
+	"aerosol_retrieval": "image_based",
+	"water_vapor_retrieval": "image_based"
+  },
+  
+  "Geometric_Correction": {
+	"pixel_size": {
+		"vnir": 0.25,
+		"swir": 0.5
+		},
+	"imu_offsets": {
+		"vnir": [0,0,0],
+		"swir": [0,0,0]
+		},
+	"sensor_model_file": {
+		"vnir": "/media/nanfeng/My Passport/Hyspex/FOVexpSensormodelVNIR1800SN00840_180deg_rotated.txt",
+		"swir": "/media/nanfeng/My Passport/Hyspex/FOVexpSensormodelSWIR384SN3142_180deg_rotated.txt"
+		},
+    "dem": "/media/nanfeng/My Passport/Hyspex/dem"
+  }
+}
