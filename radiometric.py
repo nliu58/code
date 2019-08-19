@@ -2,13 +2,14 @@
 @author: Nanfeng Liu (nliu58@wisc.edu)
 """
 
-import os
+import os, logging
 import numpy as np
-from scipy import constants, signal
-from envi import read_envi_header, empty_envi_header, write_envi_header
+from scipy      import constants, signal, optimize
+from envi       import read_envi_header, empty_envi_header, write_envi_header
+from spectral   import resample_spectra, estimate_fwhms_from_waves, get_closest_wave
 import matplotlib.pyplot as plt
-from atmosphere import read_metadata
-from spectral import get_resampling_coeff, estimate_fwhms_from_waves
+
+logger = logging.getLogger(__name__)
 
 solar_flux_file = './solar_flux.dat'
 
@@ -26,6 +27,7 @@ features = {429:  [420,  445],
             2420: [2400, 2435]}
 
 def remove_smile_effect(config, atm_lut_file, sun_zenith):
+    from atmosphere import read_wvc_model
     # Read calibration data
     cal_data = get_cal_data(config['raw_image_file'],
                             config['setting_file'])
@@ -37,6 +39,7 @@ def remove_smile_effect(config, atm_lut_file, sun_zenith):
                           mode='r',
                           offset=raw_header['header offset'],
                           shape=(raw_header['lines'], raw_header['bands'], raw_header['samples']))
+    samples = raw_header['samples']
 
     # Read mask
     mask_header = read_envi_header(os.path.splitext(config['raw_image_file'])[0]+'.hdr')
@@ -47,11 +50,20 @@ def remove_smile_effect(config, atm_lut_file, sun_zenith):
 
     # Get average radiance spectra with dark current corrected
     avg_rdn_01 = get_avg_rdn_01(raw_image, cal_data, mask_image)
+    raw_image.flush()
+    mask_image.flush()
+    del raw_header, mask_header
 
     # Get average radiance spectra with dark current and gain corrected
     avg_rdn_02 = get_avg_rdn_02(avg_rdn_01, cal_data)
 
+    plt.figure()
     plt.plot(cal_data['spectralVector'], avg_rdn_02, '-')
+    plt.show()
+
+
+    plt.figure()
+    plt.plot(cal_data['spectralVector'], avg_rdn_02[:,10], '-')
     plt.show()
 
     # Get average scan angles
@@ -59,28 +71,157 @@ def remove_smile_effect(config, atm_lut_file, sun_zenith):
 
     # Build water vapor column estimation model
     """ Notes:
-        (1) The view geometry does not seem to affect the model. Therefore, a vza=0 and raa=0 are used here.
+        (1) The view geometry does not seem to affect the model.
+            Therefore, a vza=0 and raa=0 are used here.
     """
-    cwv_model = build_wvc_model(config['wvc_model_file'], atm_lut_file, cal_data['spectralVector'], cal_data['fwhm'], 0, 0)
+    wvc_model = read_wvc_model(config['wvc_model_file'])
 
     # Estimate water vapor for each column
-    ratios = avg_rdn_02[cwv_model['bands'][1], :]/(avg_rdn_02[cwv_model['bands'][0], :]*cwv_model['weights'][0]+avg_rdn_02[cwv_model['bands'][2], :]*cwv_model['weights'][1])
-    wvcs = np.interp(ratios, cwv_model['Ratio'], cwv_model['WVC'])
-
-    plt.plot(cwv_model['Ratio'], cwv_model['WVC'], '.-', color='red')
-    plt.plot(ratios, wvcs, '.', color='blue')
+    ratio = avg_rdn_02[wvc_model['Bands'][1], :]/(avg_rdn_02[wvc_model['Bands'][0], :]*wvc_model['Weights'][0]+avg_rdn_02[wvc_model['Bands'][2], :]*wvc_model['Weights'][1])
+    wvc = np.interp(ratio, wvc_model['Ratio'], wvc_model['WVC'])
+    vis = 80
+    plt.figure()
+    plt.plot(wvc_model['Ratio'], wvc_model['WVC'], 'r.-')
+    plt.plot(ratio, wvc, 'b.')
     plt.show()
-    cwv_model['bands']
+    del ratio
 
-    rdn = raw2rdn(raw_image[:,134,:], cal_data, 134)
+    wvc = wvc.mean()
+    # Interpolate atm lut
+    lut_wave, lut_rdn_0, lut_rdn_1 = interp_atm_lut_to_angles(atm_lut_file, wvc, vis, avg_vza, avg_raa)
 
-    tmp_mask = rdn<0
+    plt.plot(lut_wave, lut_rdn_0, 'r-')
+    plt.show()
 
-    raw_image.flush()
-    mask_image.flush()
+    for wave_range in features.values():
+        wave_range = [744,  784]
+#        wave_range = [1255, 1285]
+        wave_0, band_0 = get_closest_wave(cal_data['spectralVector'], wave_range[0])
+        wave_1, band_1 = get_closest_wave(cal_data['spectralVector'], wave_range[1])
+        if abs(wave_0-wave_range[0])>10 or abs(wave_1-wave_range[1])>10:
+            continue
 
-    for band in range(mask_image.shape[0]):
-        print(np.sum(mask_image[band,:,:])/mask_image[band,:,:].size)
+        X = []
+        lower_bounds = [-5.0, -2.0]
+        upper_bounds = [5.0, 2.0]
+        for sample in range(0, samples, 100):
+            x0 = [0,0]
+            p = optimize.least_squares(err, x0,
+                                       bounds=(lower_bounds, upper_bounds),
+                                       args=(cal_data, avg_rdn_01,
+                                             lut_wave, lut_rdn_0, lut_rdn_1,
+                                             [band_0, band_1+1], sample))
+            X.append(p.x)
+    X = np.array(X)
+    plt.plot(X[:,0], '.', color='blue')
+    plt.show()
+
+def err(x, cal_data, avg_rdn_01, lut_waves, lut_rdn_0, lut_rdn_1, band_range, sample):
+    band_0 = band_range[0]
+    band_1 = band_range[1]
+
+    # Apply wavelength and fwhm shifts.
+    sensor_waves = list(cal_data['spectralVector'][:band_0])+list(cal_data['spectralVector'][band_0:band_1]+x[0])+list(cal_data['spectralVector'][band_1:])
+    sensor_fwhms = list(cal_data['fwhm'][:band_0])+list(cal_data['fwhm'][band_0:band_1]+x[1])+list(cal_data['fwhm'][band_1:])
+    sensor_fwhms = cal_data['fwhm']
+    sensor_waves = np.array(sensor_waves)
+    sensor_fwhms = np.array(sensor_fwhms)
+
+    # Get sensor radiance
+    sensor_rdn = get_avg_rdn_02(avg_rdn_01[:,sample], cal_data, sample, sensor_waves)
+    sensor_rdn = sensor_rdn[band_0:band_1]
+    sensor_waves = sensor_waves[band_0:band_1]
+    sensor_fwhms = sensor_fwhms[band_0:band_1]
+
+    lut_rdn_0 = resample_spectra(lut_rdn_0[:,sample], lut_waves, sensor_waves, sensor_fwhms)
+    lut_rdn_1 = resample_spectra(lut_rdn_1[:,sample], lut_waves, sensor_waves, sensor_fwhms)
+
+
+    lut_rdn = lut_rdn_1-lut_rdn_0
+    sensor_rdn = sensor_rdn-lut_rdn_0
+
+    sensor_rdn = spectral_continuum_remove(sensor_rdn, sensor_waves)
+    lut_rdn = spectral_continuum_remove(lut_rdn, sensor_waves)
+
+    #Define costs.
+    cost = (sensor_rdn-lut_rdn)**2
+    return cost
+
+def interp_atm_lut_to_angles(atm_lut_file, wvc, vis, vzas, raas):
+    """ Interpolate atmosphere look-up-table radiance to different view angles.
+    Notes:
+        (1) surface albedos are fixed to 0 and 0.5.
+        (2) constant water vapor column `wvc` and visibility `vis` are used.
+    Arguments:
+        atm_lut_file: str
+            Atmosphere look-up-table filename.
+        wvc, vis: float
+            Constant water vapor column and visibility.
+        vzas, raas: list of floats
+            View zenith angles and relative azimuth angles.
+    Returns:
+        WAVE: array
+            Wavelengths of the atmosphere look-up-table radiance.
+        rdn_0: 2D array
+            Interpolated path radiance (albedo=0.0) at different view angles.
+        rdn_1: 2D array
+            Interpolated at-sensor radiance (albedo=0.5) at different view angles.
+    """
+    from atmosphere import read_atm_lut_metadata
+    atm_lut_metadata = read_atm_lut_metadata(atm_lut_file+'.meta')
+    atm_lut_metadata['shape'] = tuple([int(v) for v in atm_lut_metadata['shape']])
+    WVC = np.array([float(v) for v in atm_lut_metadata['WVC']])
+    VIS = np.array([float(v) for v in atm_lut_metadata['VIS']])
+    VZA = np.array([float(v) for v in atm_lut_metadata['VZA']])
+    RAA = np.array([float(v) for v in atm_lut_metadata['RAA']])
+    WAVE = np.array([float(v) for v in atm_lut_metadata['WAVE']])
+    atm_lut = np.memmap(atm_lut_file,
+                        dtype=atm_lut_metadata['dtype'],
+                        mode='r',
+                        shape=atm_lut_metadata['shape'])
+    # subtract path radiance
+    the_rdn_0 = atm_lut[0,...]
+    the_rdn_1 = atm_lut[1,...] # shape=[WVC, VIS, VZA, RAA, WAVE]
+    atm_lut.flush()
+
+    # interpolate along water vapor column
+    index0 = np.where(WVC<=wvc)[0][-1]
+    index1 = np.where(WVC>wvc)[0][0]
+    x0 = WVC[index0]
+    x1 = WVC[index1]
+    the_rdn_0 = (the_rdn_0[index0,...]*(x1-wvc) + the_rdn_0[index1,...]*(wvc-x0))/(x1-x0) # shape=[VIS, VZA, RAA, WAVE]
+    the_rdn_1 = (the_rdn_1[index0,...]*(x1-wvc) + the_rdn_1[index1,...]*(wvc-x0))/(x1-x0) # shape=[VIS, VZA, RAA, WAVE]
+
+    # interpolate along visibility
+    index0 = np.where(VIS<=vis)[0][-1]
+    index1 = np.where(VIS>vis)[0][0]
+    x0 = VIS[index0]
+    x1 = VIS[index1]
+    the_rdn_0 = (the_rdn_0[index0,...]*(x1-wvc) + the_rdn_0[index1,...]*(wvc-x0))/(x1-x0) # shape=[VZA, RAA, WAVE]
+    the_rdn_1 = (the_rdn_1[index0,...]*(x1-wvc) + the_rdn_1[index1,...]*(wvc-x0))/(x1-x0) # shape=[VZA, RAA, WAVE]
+
+    # interpolate to angles
+    rdn_0 = []
+    rdn_1 = []
+    for vza, raa in zip(vzas, raas):
+        vza0_index = np.where(VZA<=vza)[0][-1]
+        vza1_index = np.where(VZA>vza)[0][0]
+        raa0_index = np.where(RAA<=raa)[0][-1]
+        raa1_index = np.where(RAA>raa)[0][0]
+        vza0 = VZA[vza0_index]
+        vza1 = VZA[vza1_index]
+        raa0 = RAA[raa0_index]
+        raa1 = RAA[raa1_index]
+        rdn_0.append((the_rdn_0[vza0_index,raa0_index,:]*(raa1-raa)*(vza1-vza)+
+                      the_rdn_0[vza0_index,raa1_index,:]*(raa-raa0)*(vza1-vza)+
+                      the_rdn_0[vza1_index,raa0_index,:]*(raa1-raa)*(vza-vza0)+
+                      the_rdn_0[vza1_index,raa1_index,:]*(raa-raa0)*(vza-vza0))/((raa1-raa0)*(vza1-vza0)))
+        rdn_1.append((the_rdn_1[vza0_index,raa0_index,:]*(raa1-raa)*(vza1-vza)+
+                      the_rdn_1[vza0_index,raa1_index,:]*(raa-raa0)*(vza1-vza)+
+                      the_rdn_1[vza1_index,raa0_index,:]*(raa1-raa)*(vza-vza0)+
+                      the_rdn_1[vza1_index,raa1_index,:]*(raa-raa0)*(vza-vza0))/((raa1-raa0)*(vza1-vza0)))
+
+    return WAVE, np.array(rdn_0).T, np.array(rdn_1).T
 
 def build_mask(mask_image_file, raw_image_file, setting_file, sun_zenith):
     """ Mask out bad pixels.
@@ -105,6 +246,7 @@ def build_mask(mask_image_file, raw_image_file, setting_file, sun_zenith):
                           mode='r',
                           offset=raw_header['header offset'],
                           shape=(raw_header['lines'], raw_header['bands'], raw_header['samples']))
+    bands = raw_header['bands']
 
     """ Rule 1 for good pixels:
         At-sensor blue reflectance>0.10, and nir reflectance>0.10, and swir reflectance>0.10
@@ -115,17 +257,17 @@ def build_mask(mask_image_file, raw_image_file, setting_file, sun_zenith):
     mask = np.full((raw_image.shape[0], raw_image.shape[2]), True, dtype=np.bool)
     # if the reflectance at 470 nm is less than 0.10, then mask these pixels.
     wave, band = get_closest_wave(cal_data['spectralVector'], 470)
-    if np.abs(wave-470)<10:
+    if abs(wave-470)<10:
         refl = raw2rdn(raw_image[:,band,:], cal_data, band)*np.pi/(solar_flux[band]*cos_sun_zenith)
         mask &= (refl>0.10)
     # if the reflectance at 850 nm is less than 0.10, then mask these pixels.
     wave, band = get_closest_wave(cal_data['spectralVector'], 850)
-    if np.abs(wave-850)<10:
+    if abs(wave-850)<10:
         refl = raw2rdn(raw_image[:,band,:], cal_data, band)*np.pi/(solar_flux[band]*cos_sun_zenith)
         mask &= (refl>0.10)
     # if the reflectance at 1600 nm is less than 0.10, then mask these pixels.
     wave, band = get_closest_wave(cal_data['spectralVector'], 1600)
-    if np.abs(wave-1600)<10:
+    if abs(wave-1600)<10:
         refl = raw2rdn(raw_image[:,band,:], cal_data, band)*np.pi/(solar_flux[band]*cos_sun_zenith)
         mask &= (refl>0.10)
 
@@ -136,13 +278,18 @@ def build_mask(mask_image_file, raw_image_file, setting_file, sun_zenith):
                            dtype='uint8',
                            mode='w+',
                            shape=(raw_image.shape[1], raw_image.shape[0], raw_image.shape[2]))
-    for band in range(raw_image.shape[1]):
+    log_mesg = 'Band (max=%d): ' %bands
+    for band in range(bands):
+        if band%50==0:
+            log_mesg += '%d, ' %band
         rdn = raw2rdn(raw_image[:,band,:], cal_data, band)
         mask_image[band,:,:] = mask&(raw_image[:,band,:]<cal_data['satValue'])&(rdn>0.0)
         del rdn
     mask_image.flush()
     raw_image.flush()
     del cal_data, mask
+    log_mesg += '%d, Done!' %bands
+    logging.info(log_mesg)
 
     mask_header = empty_envi_header()
     mask_header['description'] = 'Mask 0: bad; 1: good'
@@ -171,6 +318,22 @@ def nood_transform(spectra):
     spectra = (spectra-spectra.mean())/spectra.std()
 
     return spectra
+
+def spectral_continuum_remove(spectra, waves):
+    """Continuum remove spectra.
+    Arguments:
+        spectra: 1D or 2D array
+            Raw spectral data, dimension: [Bands] or [Bands, Columns].
+        waves: list
+            Spectral wavelengths.
+    Returns:
+        cont_rm_spectra: 1D or 2D array
+            Continuum removed spectra, dimension: [Bands] or [Bands, Columns].
+    """
+    waves = np.array(waves)
+    interp_spectra = (waves-waves[0])*(spectra[-1]-spectra[0])/(waves[-1]-waves[0])+spectra[0]
+    cont_rmd_spectra = spectra/interp_spectra
+    return cont_rmd_spectra
 
 def get_avg_scan_angles(sca_image_file):
     """ Get average scan angles along each column.
@@ -205,107 +368,6 @@ def get_avg_scan_angles(sca_image_file):
 
     return avg_vza, avg_raa
 
-def build_wvc_model(wvc_model_figure_file, atm_lut_file, sensor_waves, sensor_fwhms, vza=0, raa=0):
-    """ Build water vapor model for a certain view geometry.
-    Arguments:
-        wvc_model_figure_file: str
-            Water vapor column estimation model figure filename.
-        atm_lut_file: str
-            Atmosphere look-up-table file.
-        sensor_waves: array
-            Sensor center wavelengths.
-        sensor_fwhms: array
-            Sensor FWHMs.
-        vza, raa: float
-            View zenith angle, and relative azimuth angle in degrees.
-    Returns:
-        wvc_model: dict
-            Column water vapor estimation model.
-    """
-
-    # Read atm lut
-    atm_lut_metadata = read_metadata(atm_lut_file+'.meta')
-    atm_lut_metadata['shape'] = tuple([int(v) for v in atm_lut_metadata['shape']])
-    atm_lut_metadata['WVC'] = np.array([float(v) for v in atm_lut_metadata['WVC']])
-    atm_lut_metadata['VZA'] = np.array([float(v) for v in atm_lut_metadata['VZA']])
-    atm_lut_metadata['RAA'] = np.array([float(v) for v in atm_lut_metadata['RAA']])
-    atm_lut_metadata['WAVE'] = np.array([float(v) for v in atm_lut_metadata['WAVE']])
-    atm_lut = np.memmap(atm_lut_file,
-                        dtype=atm_lut_metadata['dtype'],
-                        mode='r',
-                        shape=atm_lut_metadata['shape'])
-
-    # Reduce atm lut dimensions.
-    """ Notes: atm_lut dimensions: [RHO, CWV, VIS, VZA, RAA, WAVE]
-    In general, we fix Rho=0.5, VIS=80.0, VZA=0.0, RAA=0.0
-    """
-    atm_lut = atm_lut[1,:,4,:,:,:]# Fix Rho=0.5, VIS=80.0
-
-    # Interpolate lut to `vza` and `raa`.
-    vza_lower_bound_index = np.where(atm_lut_metadata['VZA']<=vza)[0][-1]
-    vza_upper_bound_index = np.where(atm_lut_metadata['VZA']>vza)[0][0]
-    raa_lower_bound_index = np.where(atm_lut_metadata['RAA']<=raa)[0][-1]
-    raa_upper_bound_index = np.where(atm_lut_metadata['RAA']>raa)[0][0]
-    vza_lower_bound = atm_lut_metadata['VZA'][vza_lower_bound_index]
-    vza_upper_bound = atm_lut_metadata['VZA'][vza_upper_bound_index]
-    raa_lower_bound = atm_lut_metadata['RAA'][raa_lower_bound_index]
-    raa_upper_bound = atm_lut_metadata['RAA'][raa_upper_bound_index]
-    interp_rdn =  (atm_lut[:,vza_lower_bound_index,raa_lower_bound_index,:]*(raa_upper_bound-raa)*(vza_upper_bound-vza)+
-                   atm_lut[:,vza_lower_bound_index,raa_upper_bound_index,:]*(raa-raa_lower_bound)*(vza_upper_bound-vza)+
-                   atm_lut[:,vza_upper_bound_index,raa_lower_bound_index,:]*(raa_upper_bound-raa)*(vza-vza_lower_bound)+
-                   atm_lut[:,vza_upper_bound_index,raa_upper_bound_index,:]*(raa-raa_lower_bound)*(vza-vza_lower_bound))/(
-                           (raa_upper_bound-raa_lower_bound)*(vza_upper_bound-vza_lower_bound))
-    atm_lut.flush()
-
-    # Get model wavelength posistions.
-    wvc_model = dict()
-    the_wave, _  = get_closest_wave(sensor_waves, 650)
-    if np.abs(the_wave-650)<20:# vnir sensor
-        three_waves = [890, 940, 1000]
-    else:# swir sensor
-        three_waves = [1070, 1130, 1200]
-
-    left_wave, left_band = get_closest_wave(sensor_waves, three_waves[0])
-    middle_wave, middle_band = get_closest_wave(sensor_waves, three_waves[1])
-    right_wave, right_band = get_closest_wave(sensor_waves, three_waves[2])
-
-    left_weight = (right_wave-middle_wave)/(right_wave-left_wave)
-    right_weight = (middle_wave-left_wave)/(right_wave-left_wave)
-
-    wvc_model['bands'] = [left_band, middle_band, right_band]
-    wvc_model['weights'] = [left_weight, right_weight]
-    wvc_model['waves'] = [left_wave, middle_wave, right_wave]
-
-    # Resample radiance to model wavelengths
-    sample_coeff = get_resampling_coeff(atm_lut_metadata['WAVE'], sensor_waves[wvc_model['bands']], sensor_fwhms[wvc_model['bands']])
-    resampled_rdn = np.dot(interp_rdn, sample_coeff)/10 # 10: mW / (m2 nm) -> mW / (cm2 um)
-
-    # Calculate absorption depths
-    ratios = resampled_rdn[:,1]/(left_weight*resampled_rdn[:,0]+right_weight*resampled_rdn[:,2])
-
-    # Save depths and wvc to the model
-    index = np.argsort(ratios)
-    wvc_model['WVC'] = list(atm_lut_metadata['WVC'][index])
-    wvc_model['Ratio'] = list(ratios[index])
-
-    # Make a plot
-    plt.figure(figsize=(10, 6))
-    plt.plot(np.array(wvc_model['Ratio'])*100, wvc_model['WVC'], '.-', ms=20, lw=2, color='red')
-    plt.xticks([0, 20, 40, 60, 80, 100], [0, 20, 40, 60, 80, 100], fontsize=20)
-    plt.yticks([0, 10, 20, 30, 40, 50], [0, 10, 20, 30, 40, 50], fontsize=20)
-    plt.text(60, 50, r'$\lambda_{Left}$: %.2f nm' %left_wave, fontsize=20)
-    plt.text(60, 45, r'$\lambda_{Middle}$: %.2f nm' %middle_wave, fontsize=20)
-    plt.text(60, 40, r'$\lambda_{Right}$: %.2f nm' %right_wave, fontsize=20)
-
-    plt.xlim(0, 100)
-    plt.ylim(0, 55)
-    plt.xlabel('APDA Ratio (%)', fontsize=20)
-    plt.ylabel('WVC (mm)', fontsize=20)
-    plt.savefig(wvc_model_figure_file, dpi=1000)
-    plt.close()
-
-    return wvc_model
-
 def get_avg_rdn_01(raw_image, cal_data, mask_image):
     """ Average radiance along each column (only dark current corrected!).
     Arguments:
@@ -331,11 +393,10 @@ def get_avg_rdn_01(raw_image, cal_data, mask_image):
         if serial_number>=3000 and serial_number<=5000:
             offset = np.zeros((lines, samples))
             background_last = cal_data['backgroundLast'][band,:]
-            for line in range(lines):
-                offset[line,:] = background+(background_last-background)*line/number_of_frames
+            offset = background+(background_last-background)*np.expand_dims(np.arange(lines), axis=1)/number_of_frames
             del background_last
         else:
-            offset = np.tile(background, (lines, 1))
+            offset = background
         tmp = (raw_image[:,band,:]).astype('float')-offset # tmp.size = (lines, samples)
         tmp = np.ma.array(tmp, mask=~mask_image[band,:,:]).mean(axis=0) # tmp.size = (samples)
         for bad_sample in np.where(tmp.mask)[0]:
@@ -350,10 +411,10 @@ def get_avg_rdn_01(raw_image, cal_data, mask_image):
 
     return avg_rdn_01
 
-def get_avg_rdn_02(avg_rdn_01, cal_data):
+def get_avg_rdn_02(avg_rdn_01, cal_data, sample=None, waves=None):
     """ Average radiance along each column (both dark current and gain corrected!).
     Arguments:
-        avg_rdn_01: 2D array
+        avg_rdn_01: 1D or 2D array
             Averaged radiance along each column with dark current corrected, dimension: [bands, samples].
         cal_data: dict
             Calibration data.
@@ -361,76 +422,88 @@ def get_avg_rdn_02(avg_rdn_01, cal_data):
         avg_rdn_02: 2D array
             Averaged radiance along each column (both dark current and gain corrected!), dimension: [bands, samples].
     """
-    samples = avg_rdn_01.shape[1]
-
-    h = constants.Planck # Planck constant
-    c = constants.c*1e+9 # Light speed nm/s
-    RE = cal_data['RE'] # (bands, samples)
-    QE = np.tile(cal_data['QE'], (samples,1)).transpose() # (bands)
+    h = constants.Planck# Planck constant
+    c = constants.c*1e+9# Light speed nm/s
     SF = cal_data['SF']
     integration_time = cal_data['integrationTime']
     aperture_area = np.pi*cal_data['apertureSize']*cal_data['apertureSize']
     solid_angle = cal_data['solidAngle']
-    wavelength_interval = np.tile(cal_data['spectralSampling'], (samples, 1)).transpose() # (bands, samples)
-    center_wavelength = np.tile(cal_data['spectralVector'], (samples, 1)).transpose() # (bands, samples)
-    # Calculate gain
-    gain = h*c*1e6/(RE*QE*SF*integration_time*aperture_area*solid_angle*wavelength_interval*center_wavelength)
-    avg_rdn_02 = gain*avg_rdn_01*100 # in mW/(cm2*um)
-    del gain
-    # Smooth this radiance
-    for avg_rdn in avg_rdn_02:
-        relative_diff = signal.medfilt(avg_rdn)/(avg_rdn+1e-4)-1.0
-        bad_columns = np.where(np.abs(relative_diff)>0.05)[0]
-        for bad_column in bad_columns:
-            if bad_column == 0:
-                avg_rdn[bad_column] = avg_rdn[bad_column+1]
-            elif bad_column == samples-1:
-                avg_rdn[bad_column] = avg_rdn[bad_column-1]
-            else:
-                avg_rdn[bad_column] = (avg_rdn[bad_column-1]+avg_rdn[bad_column+1])/2.0
+
+    if avg_rdn_01.ndim==1:
+        RE = cal_data['RE'][:,sample]# (bands)
+        if len(waves):
+            QE = np.interp(waves, cal_data['spectralVector'], cal_data['QE'])
+        else:
+            QE = cal_data['QE']
+        wavelength_interval = cal_data['spectralSampling']
+        center_wavelength = cal_data['spectralVector']# (bands)
+        gain = h*c*1e6/(RE*QE*SF*integration_time*aperture_area*solid_angle*wavelength_interval*center_wavelength)
+        avg_rdn_02 = gain*avg_rdn_01*100# in mW/(cm2*um)
+        del gain
+    else:
+        samples = avg_rdn_01.shape[1]
+        RE = cal_data['RE']# (bands, samples)
+        if waves:
+            QE = np.interp(waves, cal_data['spectralVector'], cal_data['QE'])
+            QE = np.tile(QE, (samples,1)).transpose()# (bands, samples)
+        else:
+            QE = np.tile(cal_data['QE'], (samples,1)).transpose()# (bands, samples)
+        wavelength_interval = np.tile(cal_data['spectralSampling'], (samples, 1)).transpose()# (bands, samples)
+        center_wavelength = np.tile(cal_data['spectralVector'], (samples, 1)).transpose()# (bands, samples)
+        gain = h*c*1e6/(RE*QE*SF*integration_time*aperture_area*solid_angle*wavelength_interval*center_wavelength)
+        avg_rdn_02 = gain*avg_rdn_01*100# in mW/(cm2*um)
+        del gain
+        # Smooth radiance spatially
+        for avg_rdn in avg_rdn_02:
+            relative_diff = signal.medfilt(avg_rdn)/(avg_rdn+1e-4)-1.0
+            bad_columns = np.where(np.abs(relative_diff)>0.05)[0]
+            for bad_column in bad_columns:
+                if bad_column == 0:
+                    avg_rdn[bad_column] = avg_rdn[bad_column+1]
+                elif bad_column == samples-1:
+                    avg_rdn[bad_column] = avg_rdn[bad_column-1]
+                else:
+                    avg_rdn[bad_column] = (avg_rdn[bad_column-1]+avg_rdn[bad_column+1])/2.0
 
     return avg_rdn_02
 
-def get_closest_wave(waves, center_wav):
-    """ Get the band index whose wavelength is closest to `center_wav`.
-    Arguments:
-        waves: array
-            Wavelength array.
-        center_wav: float
-            Center wavelength.
-    Returns:
-        Closest wavelength and its band index.
-    """
-
-    band_index = np.argmin(np.abs(np.array(waves)-center_wav))
-
-    return waves[band_index], band_index
-
-def raw2rdn(raw_image, cal_data, band_index):
+def raw2rdn(raw_image, cal_data, band_index, wave=None):
     """ Convert raw DN values to physical radiance in mW/(cm2*um) for one band.
     Arguments:
-        raw_image: array
+        raw_image: 2D array
             Single band raw DN image.
         cal_data: dict
             Calibration data.
         band_index: int
             Band index.
+        wave: None or float
+            User-defined wavelength.
+    Returns:
+        rdn_image: 2D array
+            Single band radiance image.
     """
 
-    # Get calibration values
     lines = raw_image.shape[0]
-    h = constants.Planck # Planck constant
-    c = constants.c*1e+9 # Light speed nm/s
+
+    # Get calibration values
+    h = constants.Planck# Planck constant
+    c = constants.c*1e+9# Light speed nm/s
     RE = cal_data['RE'][band_index, :]
-    QE = cal_data['QE'][band_index]
+    if wave:
+        QE = np.interp(wave, cal_data['spectralVector'], cal_data['QE'])
+    else:
+        QE = cal_data['QE'][band_index]
     SF = cal_data['SF']
     integration_time = cal_data['integrationTime']
     aperture_area = np.pi*cal_data['apertureSize']*cal_data['apertureSize']
     solid_angle = cal_data['solidAngle']
     wavelength_interval = cal_data['spectralSampling'][band_index]
-    center_wavelength = cal_data['spectralVector'][band_index]
+    if wave:
+        center_wavelength = wave
+    else:
+        center_wavelength = cal_data['spectralVector'][band_index]
     number_of_frames = cal_data['numberOfFrames']
-    background = cal_data['background'][band_index,:]
+
     serial_number = cal_data['serialNumber']
 
     # Calculate gain
@@ -438,19 +511,21 @@ def raw2rdn(raw_image, cal_data, band_index):
     gain = np.tile(gain, (lines, 1))
 
     # Calculate offset
-    if serial_number >=3000 and serial_number<=5000:
+    if serial_number>=3000 and serial_number<=5000:
         offset = np.zeros_like(gain)
+        background = cal_data['background'][band_index,:]
         background_last = cal_data['backgroundLast'][band_index,:]
         for line in range(lines):
             offset[line,:] = background+(background_last-background)*line/number_of_frames
-        del background_last
+        del background, background_last
     else:
+        background = cal_data['background'][band_index,:]
         offset = np.tile(background, (lines, 1))
-    del background
+        del background
 
     # Calibration
     rdn_image = ((raw_image.astype('float32')-offset)*gain).astype('float32')
-    rdn_image = rdn_image*100.0 # in mW/(cm2*um)
+    rdn_image = rdn_image*100.0# in mW/(cm2*um)
     del gain, offset
 
     return rdn_image
@@ -632,8 +707,7 @@ def resample_solar_flux(solar_flux_file, sensor_waves, sensor_fwhms):
     """
 
     solar_flux = np.loadtxt(solar_flux_file)
-    sample_coeff = get_resampling_coeff(solar_flux[:,0], sensor_waves, sensor_fwhms)
-    solar_flux = np.dot(solar_flux[:,1], sample_coeff)
+    solar_flux = resample_spectra(solar_flux[:,1], solar_flux[:,0], sensor_waves, sensor_fwhms)
 
     return solar_flux
 

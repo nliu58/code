@@ -2,11 +2,13 @@
 @author: Nanfeng Liu (nliu58@wisc.edu)
 """
 
-import gdal
-import numpy as np
-import matplotlib.pyplot as plt
+import logging, gdal, numpy as np, matplotlib.pyplot as plt
 from envi import read_envi_header
-from radiometric import get_cal_data, raw2rdn
+
+mpl_logger = logging.getLogger('matplotlib')
+mpl_logger.setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
 
 def plot_angle_geometry(angle_geometry_figure_file, sca_image_file):
     """ Plot sun and view geometry in a polar coordinate system.
@@ -28,17 +30,12 @@ def plot_angle_geometry(angle_geometry_figure_file, sca_image_file):
     # Scatter-plot view geometry.
     plt.figure(figsize=(10, 10))
     ax = plt.subplot(111, projection='polar')
-    ax.scatter(np.deg2rad(sca_image[1,:,:].flatten()),
-                sca_image[0,:,:].flatten(),
-                color='green')
+    ax.scatter(np.deg2rad(sca_image[1,:,:].flatten()), sca_image[0,:,:].flatten(), color='green')
     sca_image.flush()
 
     # Scatter-plot sun geometry.
-    ax.scatter(np.deg2rad(float(sca_header['sun azimuth'])),
-                float(sca_header['sun zenith']),
-                color='red',
-                marker='*',
-                s=500)
+    ax.scatter(np.deg2rad(float(sca_header['sun azimuth'])), float(sca_header['sun zenith']), color='red', marker='*', s=500)
+    del sca_header
 
     # Flip figure left to right.
     ax.set_theta_direction(-1)
@@ -49,7 +46,9 @@ def plot_angle_geometry(angle_geometry_figure_file, sca_image_file):
     plt.savefig(angle_geometry_figure_file)
     plt.close()
 
-    del sca_header, ax
+    del ax
+
+    logger.info('Save angle geometry figure to %s.' %angle_geometry_figure_file)
 
 def plot_image_area(image_area_figure_file, dem_image_file, igm_image_file, imugps_file):
     """ Plot image area.
@@ -106,6 +105,8 @@ def plot_image_area(image_area_figure_file, dem_image_file, igm_image_file, imug
     plt.close()
     del cols, rows, imugps
 
+    logger.info('Save image area figure to %s.' %image_area_figure_file)
+
 def linear_percent_stretch(raw_image):
     """ Do linear percent stretch.
     References:
@@ -137,7 +138,7 @@ def make_quickview(qickview_figure_file,  raw_image_file, glt_image_file, settin
         glt_image_file: str
             GLT image filename.
     """
-
+    from radiometric import get_cal_data, raw2rdn
     # Read Hyspex raw image
     raw_header = read_envi_header(raw_image_file[:-len('.hyspex')]+'.hdr')
     raw_image = np.memmap(raw_image_file,
@@ -178,3 +179,31 @@ def make_quickview(qickview_figure_file,  raw_image_file, glt_image_file, settin
     glt_image.flush()
     ds = None
     del cal_data, I, J, glt_header, raw_header
+
+    logger.info('Save quickview figure to %s.' %qickview_figure_file)
+
+def plot_wvc_model(wvc_model_figure_file, wvc_model_file):
+    """ Plot the WVC model to a figure.
+    wvc_model_figure_file: str
+        Water vapor column model figure filename.
+    wvc_model: dict
+        Water vapor column model.
+    """
+    from atmosphere  import read_wvc_model
+    wvc_model = read_wvc_model(wvc_model_file)
+    plt.figure(figsize=(10, 6))
+    plt.plot(np.array(wvc_model['Ratio'])*100, wvc_model['WVC'], '.-', ms=20, lw=2, color='red')
+    plt.xticks([0, 20, 40, 60, 80, 100], [0, 20, 40, 60, 80, 100], fontsize=20)
+    plt.yticks([0, 10, 20, 30, 40, 50], [0, 10, 20, 30, 40, 50], fontsize=20)
+    plt.text(60, 50, r'$\lambda_{Left}$: %.2f nm' %wvc_model['Waves'][0], fontsize=20)
+    plt.text(60, 45, r'$\lambda_{Middle}$: %.2f nm' %wvc_model['Waves'][1], fontsize=20)
+    plt.text(60, 40, r'$\lambda_{Right}$: %.2f nm' %wvc_model['Waves'][2], fontsize=20)
+
+    plt.xlim(0, 100)
+    plt.ylim(0, 55)
+    plt.xlabel('APDA Ratio (%)', fontsize=20)
+    plt.ylabel('WVC (mm)', fontsize=20)
+    plt.savefig(wvc_model_figure_file, dpi=1000)
+    plt.close()
+
+    logger.info('Save WVC model figure to %s.' %wvc_model_file)

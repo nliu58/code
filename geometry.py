@@ -2,10 +2,10 @@
 @author: Nanfeng Liu (nliu58@wisc.edu)
 """
 
-import os
-import gdal
-import numpy as np
+import os, logging, gdal, numpy as np
 from envi import empty_envi_header, read_envi_header, write_envi_header
+
+logger = logging.getLogger(__name__)
 
 def build_igm(igm_image_file, imugps_file, sensor_model_file, dem_image_file):
     """ Create an input geometry (IGM) image.
@@ -41,26 +41,31 @@ def build_igm(igm_image_file, imugps_file, sensor_model_file, dem_image_file):
     xyz0, xyz1 = get_xyz0_xyz1(imugps[:,1:4], L0, dem_image.min(), dem_image.max())
 
     # Ray-tracing
-    n_lines = imugps.shape[0]
-    n_detectors = L0.shape[1]
-    igm_image = np.memmap(igm_image_file, dtype='float64', mode='w+', shape=(3, n_lines, n_detectors))
-    for i_line in range(n_lines): # line loop
-        for i_detector in range(n_detectors): # detector loop
-            igm_image[0, i_line, i_detector], igm_image[1, i_line, i_detector], igm_image[2, i_line, i_detector]= \
-            ray_tracing(xyz0[:, i_detector, i_line],
-                        xyz1[:, i_detector, i_line],
-                        L0[:, i_detector, i_line],
+    lines = imugps.shape[0]
+    detectors = L0.shape[1]
+    igm_image = np.memmap(igm_image_file, dtype='float64', mode='w+', shape=(3, lines, detectors))
+    log_mesg = 'Line (max=%d): ' %lines
+    for line in range(lines): # line loop
+        if line%100 == 0:
+            log_mesg += '%d ,' %(line+1)
+        for detector in range(detectors): # detector loop
+            igm_image[0, line, detector], igm_image[1, line, detector], igm_image[2, line, detector]= \
+            ray_tracing(xyz0[:, detector, line],
+                        xyz1[:, detector, line],
+                        L0[:, detector, line],
                         dem_image,
                         [dem_geotransform[0], dem_geotransform[3]],
                         dem_geotransform[1])
     igm_image.flush()
     del dem_image, xyz0, xyz1, L0, imugps
+    log_mesg += '%d, Done!' %lines
+    logger.info(log_mesg)
 
     # Write IGM header file
     igm_header = empty_envi_header()
     igm_header['description'] = 'IGM (map coordinate system=%s)' %(dem_prj)
-    igm_header['samples'] = n_detectors
-    igm_header['lines'] = n_lines
+    igm_header['samples'] = detectors
+    igm_header['lines'] = lines
     igm_header['bands'] = 3
     igm_header['byte order'] = 0
     igm_header['header offset'] = 0
@@ -70,6 +75,8 @@ def build_igm(igm_image_file, imugps_file, sensor_model_file, dem_image_file):
     igm_header_file = os.path.splitext(igm_image_file)[0]+'.hdr'
     write_envi_header(igm_header_file, igm_header)
     del igm_header
+
+    logger.info('Write IGM data to %s.' %igm_image_file)
 
 def build_sca(sca_image_file, imugps_file, igm_image_file, sun_angles, map_crs):
     """ Create a scan angle (SCA) image.
@@ -140,6 +147,8 @@ def build_sca(sca_image_file, imugps_file, igm_image_file, sun_angles, map_crs):
     sca_header_file = os.path.splitext(sca_image_file)[0]+'.hdr'
     write_envi_header(sca_header_file, sca_header)
     del sca_header
+
+    logger.info('Write SCA data to %s.' %sca_image_file)
 
 def build_glt(glt_image_file, igm_image_file, pixel_size, map_crs):
     """ Create a geographic lookup table (GLT) image.
@@ -314,6 +323,8 @@ def build_glt(glt_image_file, igm_image_file, pixel_size, map_crs):
     os.remove(index_header_file)
     os.remove(igm_vrt_file)
     os.remove(tmp_glt_image_file)
+
+    logger.info('Write geometric LUT data to %s.' %glt_image_file)
 
 def get_scan_vectors(imu, sensor_model):
     """ Get scan vectors.

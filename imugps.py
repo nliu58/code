@@ -2,9 +2,9 @@
 @author: Nanfeng Liu (nliu58@wisc.edu)
 """
 
-import osr
-import numpy as np
-from geography import define_wgs84_crs, get_grid_convergence
+import osr, logging, numpy as np
+
+logger = logging.getLogger(__name__)
 
 def process_imugps(new_imugps_file, old_imugps_file, imu_offsets, map_crs):
     """ Process Hyspex IMU and GPS data.
@@ -22,6 +22,7 @@ def process_imugps(new_imugps_file, old_imugps_file, imu_offsets, map_crs):
         map_crs: osr object
             Map coordinate system.
     """
+    from geography import define_wgs84_crs, get_grid_convergence
 
     # Load the old IMU/GPS file
     old_imugps = np.loadtxt(old_imugps_file)
@@ -56,3 +57,31 @@ def process_imugps(new_imugps_file, old_imugps_file, imu_offsets, map_crs):
                new_imugps,
                header='\n'.join(header),
                fmt='%d    %.3f    %.3f    %.3f    %.10f    %.10f    %.10f    %.5f    %.10f    %.10f    %.10f')
+    logger.info('Write IMUGPS data to %s.' %new_imugps_file)
+
+def get_acquisition_time(header_file, imugps_file):
+    """Get Hyspex image acquistion time.
+    Notes:
+        (1) The code is adapted from Brendan Heberlein's (bheberlein@wisc.edu) script.
+    Arguments:
+        header_file: str
+            Hyspex header filename.
+        imugps_file: str
+            Hyspex imugps filename.
+    Returns:
+        when: datetime object
+            Image acquisition time.
+    """
+
+    from datetime import datetime, timedelta
+    from envi import read_envi_header
+
+    header = read_envi_header(header_file)
+    week_start = datetime.strptime(f"{header['acquisition date']} 00:00:00", "%Y-%m-%d %H:%M:%S")
+    week_seconds = np.loadtxt(imugps_file)[:,7].mean()
+    epoch = datetime(1980, 1, 6, 0, 0)
+    gps_week = (week_start-epoch).days//7
+    time_elapsed = timedelta(days=gps_week*7, seconds=week_seconds)
+    when = epoch+time_elapsed
+
+    return when

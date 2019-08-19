@@ -2,7 +2,7 @@
 @author: Nanfeng Liu (nliu58@wisc.edu)
 """
 
-import gdal, osr
+import os, gdal, osr
 import numpy as np
 
 def get_utm_zone(lon):
@@ -118,6 +118,46 @@ def get_grid_convergence(lon, lat, map_crs):
         grid_convergence[index] = -grid_convergence[index]
 
     return grid_convergence
+
+def get_map_crs(dem, imugps_file):
+    """ Get map coordinate system.
+    Notes:
+        If `dem` is a file, the map coordinate system should be
+        the same as that of the dem file; otherwise define a UTM coordinate system
+        based on the longitudes and latitudes in `imugps_file`.
+    Arguments:
+        dem: str or float
+            DEM image filename, or user-specified DEM value.
+        imugps_file: str
+            Hyspex raw IMUGPS filename.
+    Returns:
+        map_crs: osr object
+            Map coordinate system.
+    """
+
+    if os.path.isfile(dem):
+        map_crs = get_raster_crs(dem)
+    else:
+        imugps = np.loadtxt(imugps_file)
+        longitude, latitude = imugps[:,1].mean(), imugps[:,2].mean()
+        map_crs = define_utm_crs(longitude, latitude)
+
+    return map_crs
+
+def get_sun_angles(imugps_file, acquisition_time):
+    """ Calculate sun angles (zenith and azimuth).
+    Arguments:
+        imugps_file: str
+            Hyspex raw IMUGPS filename.
+        acquisition_time: datetime object
+            Image acquisition datetime.
+    """
+
+    imugps = np.loadtxt(imugps_file)
+    longitude, latitude = imugps[:,1].mean(), imugps[:,2].mean()
+    sun_zenith, sun_azimuth = get_sun_position(longitude, latitude, acquisition_time)
+
+    return [sun_zenith, sun_azimuth]
 
 def get_sun_position(longitude, latitude, utc_time):
     """ Calculate the Sun's position.

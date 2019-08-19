@@ -38,7 +38,7 @@ def gaussian(x, mu, fwhm):
 
     return np.exp(-1*((x-mu)**2/(2*sigma**2)))/(sigma*np.sqrt(2*np.pi))
 
-def get_resampling_coeff(src_waves, dst_waves, dst_fwhms):
+def resample_spectra(spectra, src_waves, dst_waves, dst_fwhms):
     """ Return a set of coeffiencients for spectrum resampling.
     Notes:
         (1) Given a set of source wavelengths, destination wavelengths and FWHMs this
@@ -46,6 +46,8 @@ def get_resampling_coeff(src_waves, dst_waves, dst_fwhms):
             to the output wavelength. It assumes that output
             response functions follow a gaussian distribution.
     Arguments:
+        spectra: array
+            Spectra to be resampled.
         src_waves: array
             List of source wavelength centers.
         dst_waves: array
@@ -58,6 +60,7 @@ def get_resampling_coeff(src_waves, dst_waves, dst_fwhms):
     """
 
     dst_matrix = []
+
     for dst_wave, dst_fwhm in zip(dst_waves, dst_fwhms):
         a =  gaussian(src_waves -.5, dst_wave, dst_fwhm)
         b =  gaussian(src_waves +.5, dst_wave, dst_fwhm)
@@ -65,4 +68,21 @@ def get_resampling_coeff(src_waves, dst_waves, dst_fwhms):
         dst_matrix.append(np.divide(area,np.sum(area)))
     dst_matrix = np.array(dst_matrix)
 
-    return dst_matrix.T
+    resampled_spectra = np.dot(spectra, dst_matrix.T)
+
+    return resampled_spectra
+
+def get_closest_wave(waves, center_wav):
+    """ Get the band index whose wavelength is closest to `center_wav`.
+    Arguments:
+        waves: array
+            Wavelength array.
+        center_wav: float
+            Center wavelength.
+    Returns:
+        Closest wavelength and its band index.
+    """
+
+    band_index = np.argmin(np.abs(np.array(waves)-center_wav))
+
+    return waves[band_index], band_index

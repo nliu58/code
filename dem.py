@@ -2,12 +2,11 @@
 @author: Nanfeng Liu (nliu58@wisc.edu)
 """
 
-import os
-import gdal
-import numpy as np
-from envi import empty_envi_header, write_envi_header
+import logging, os, sys, gdal, numpy as np
 
-def get_avg_elevation(dem_image_file):
+logger = logging.getLogger(__name__)
+
+def get_avg_elev(dem_image_file):
     """ Get the average elevation of a DEM image.
     Notes:
         Pixels with a negative elevation are excluded from averaging.
@@ -15,17 +14,17 @@ def get_avg_elevation(dem_image_file):
         dem_image_file: str
             DEM image filename.
     Returns:
-        avg_elevation: float
+        avg_elev: float
             Average elevation.
     """
 
     ds = gdal.Open(dem_image_file, gdal.GA_ReadOnly)
     dem_image = ds.GetRasterBand(1).ReadAsArray()
-    avg_elevation = dem_image[dem_image>0].mean()
+    avg_elev = dem_image[dem_image>0].mean()# negative DEM values are ignored.
     ds = None
     del dem_image
 
-    return avg_elevation
+    return avg_elev
 
 def process_dem(new_dem_image_file, old_dem, imugps_file, fov, map_crs, pixel_size):
     """ Process DEM.
@@ -46,20 +45,20 @@ def process_dem(new_dem_image_file, old_dem, imugps_file, fov, map_crs, pixel_si
             Image pixel size.
     """
 
+    from envi import empty_envi_header, write_envi_header
+
     # Estimate the spatial area of the flight.
-    imugps = np.loadtxt(imugps_file)
     """ Notes:
-        The first three columns of `imugps` are the flight Map X, Map Y, Height.
-    """
-    altitude = imugps[:,3].max()
-    buffer = 50
-    """ Notes:
-        (1) The `altitude` here is above the mean sea level, or the Earth ellipsoid surface.
+        (1) The first three columns of `imugps` are the flight Map X, Map Y, Height.
+        (2) The `altitude` here is above the mean sea level, or the Earth ellipsoid surface.
             It is NOT the altitude above the ground surface.
             Strictly speaking, it should be subtracted by the average elevation
             before calculating `half_swath`.
-        (2) A buffer of 50 m is used to ensure the processed DEM image covers the whole flight area.
+        (3) A buffer of 50 m is used to ensure the processed DEM image covers the whole flight area.
     """
+    imugps = np.loadtxt(imugps_file)
+    altitude = imugps[:,3].max()
+    buffer = 50
     half_swath = np.tan(np.deg2rad(fov/2))*altitude
     x_min = imugps[:,1].min()-half_swath-buffer
     x_max = imugps[:,1].max()+half_swath+buffer
@@ -68,10 +67,11 @@ def process_dem(new_dem_image_file, old_dem, imugps_file, fov, map_crs, pixel_si
     del imugps, half_swath, altitude, buffer
 
     # Process DEM
+    """ Notes:
+        (1) If `old_dem` is a filename, then clip it.
+        (2) If `old_dem` is a constant, then make a flat DEM.
+    """
     if type(old_dem) is str:
-        """ Notes:
-                (1) If `old_dem` is a filename, then clip it.
-        """
         # Read raw DEM
         ds = gdal.Open(old_dem, gdal.GA_ReadOnly)
 
@@ -86,14 +86,15 @@ def process_dem(new_dem_image_file, old_dem, imugps_file, fov, map_crs, pixel_si
             row_0>ds.RasterYSize-1 or
             col_1<0 or
             row_1<0):
-            raise Exception('The DEM image does not cover the flight area!')
+            logger.error('The DEM image does not cover the flight area!')
+            sys.exit(1)
 
         col_0 = max(col_0, 0)
         row_0 = max(row_0, 0)
         col_1 = min(col_1, ds.RasterXSize-1)
         row_1 = min(row_1, ds.RasterYSize-1)
-        cols = int(col_1-col_0)
-        rows = int(row_1-row_0)
+        cols  = int(col_1-col_0)
+        rows  = int(row_1-row_0)
 
         # Read a subset of DEM
         dem_image = ds.GetRasterBand(1).ReadAsArray(col_0, row_0, cols, rows)
@@ -116,9 +117,6 @@ def process_dem(new_dem_image_file, old_dem, imugps_file, fov, map_crs, pixel_si
         del col_0, col_1, row_0, row_1
 
     elif type(old_dem) in [int, float]:
-        """ Notes:
-                If `old_dem` is a numerical value, then make a flat DEM.
-        """
         # Make a flat DEM
         rows = int((y_max-y_min)/pixel_size)
         cols = int((x_max-x_min)/pixel_size)
@@ -156,3 +154,5 @@ def process_dem(new_dem_image_file, old_dem, imugps_file, fov, map_crs, pixel_si
             new_dem_header['map info'][8] = 'South'
     write_envi_header(new_dem_header_file, new_dem_header)
     del new_dem_header, new_dem_header_file
+
+    logger.info('Write DEM to %s.' %new_dem_image_file)
