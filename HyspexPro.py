@@ -91,7 +91,7 @@ class HypexPro():
         config['log_file'] = os.path.join(config['output_dir'], '%s.log' %flight_index)
         logging.basicConfig(filename=config['log_file'],
                             level=logging.DEBUG,
-                            format="%(asctime)s %(funcName)20s: %(message)s",
+                            format="%(asctime)s %(funcName)25s: %(message)s",
                             datefmt='%Y-%m-%dT%H:%M:%S',
                             filemode='w')
         logger = logging.getLogger()
@@ -113,60 +113,58 @@ class HypexPro():
 
             logger.info('Process %s-sensor IMUGPS data.' %(sensor.upper()))
             config[sensor]['new_imugps_file'] = os.path.join(config[sensor]['output_dir'], basename+'_IMUGPS.txt')
-#            process_imugps(config[sensor]['new_imugps_file'],
-#                           config[sensor]['raw_imugps_file'],
-#                           config[sensor]['imu_offsets'],
-#                           config['map_crs'])
+            process_imugps(config[sensor]['new_imugps_file'],
+                           config[sensor]['raw_imugps_file'],
+                           config[sensor]['imu_offsets'],
+                           config['map_crs'])
 
             logger.info('Process %s-sensor DEM data.' %(sensor.upper()))
             config[sensor]['new_dem_image_file'] = os.path.join(config[sensor]['output_dir'], basename+'_DEM')
-#            process_dem(config[sensor]['new_dem_image_file'],
-#                        config['raw_dem'],
-#                        config[sensor]['new_imugps_file'],
-#                        config[sensor]['fov'],
-#                        config['map_crs'],
-#                        config[sensor]['pixel_size'])
+            process_dem(config[sensor]['new_dem_image_file'],
+                        config['raw_dem'],
+                        config[sensor]['new_imugps_file'],
+                        config[sensor]['fov'],
+                        config['map_crs'],
+                        config[sensor]['pixel_size'])
 
             logger.info('Build %s-sensor IGM.' %(sensor.upper()))
             config[sensor]['igm_image_file'] = os.path.join(config[sensor]['output_dir'], basename+'_IGM')
-#            build_igm(config[sensor]['igm_image_file'],
-#                      config[sensor]['new_imugps_file'],
-#                      config[sensor]['sensor_model_file'],
-#                      config[sensor]['new_dem_image_file'])
-
+            build_igm(config[sensor]['igm_image_file'],
+                      config[sensor]['new_imugps_file'],
+                      config[sensor]['sensor_model_file'],
+                      config[sensor]['new_dem_image_file'])
             logger.info('Create %s-sensor SCA.' %(sensor.upper()))
             config[sensor]['sca_image_file'] = os.path.join(config[sensor]['output_dir'], basename+'_SCA')
-#            build_sca(config[sensor]['sca_image_file'],
-#                      config[sensor]['new_imugps_file'],
-#                      config[sensor]['igm_image_file'],
-#                      config['sun_angles'],
-#                      config['map_crs'])
+            build_sca(config[sensor]['sca_image_file'],
+                      config[sensor]['new_imugps_file'],
+                      config[sensor]['igm_image_file'],
+                      config['sun_angles'],
+                      config['map_crs'])
 
             logger.info('Build %s-sensor geometric LUT.' %(sensor.upper()))
             config[sensor]['glt_image_file'] = os.path.join(config[sensor]['output_dir'], basename+'_GLT')
-#            build_glt(config[sensor]['glt_image_file'],
-#                      config[sensor]['igm_image_file'],
-#                      config[sensor]['pixel_size']/2.0,
-#                      config['map_crs'])
+            build_glt(config[sensor]['glt_image_file'],
+                      config[sensor]['igm_image_file'],
+                      config[sensor]['pixel_size']/2.0,
+                      config['map_crs'])
 
             logger.info('Make %s-sensor qickview.' %(sensor.upper()))
             config[sensor]['qickview_figure_file'] = os.path.join(config[sensor]['output_dir'], basename+'_Quickview.tif')
-#            make_quickview(config[sensor]['qickview_figure_file'],
-#                           config[sensor]['raw_image_file'],
-#                           config[sensor]['glt_image_file'],
-#                           config[sensor]['setting_file'])
+            make_quickview(config[sensor]['qickview_figure_file'],
+                           config[sensor]['raw_image_file'],
+                           config[sensor]['glt_image_file'],
+                           config[sensor]['setting_file'])
 
             logger.info('Plot %s-sensor image area.' %(sensor.upper()))
             config[sensor]['image_area_figure_file'] = os.path.join(config[sensor]['output_dir'], basename+'_ImageArea.png')
-#            plot_image_area(config[sensor]['image_area_figure_file'],
-#                            config[sensor]['new_dem_image_file'],
-#                            config[sensor]['igm_image_file'],
-#                            config[sensor]['new_imugps_file'])
-
+            plot_image_area(config[sensor]['image_area_figure_file'],
+                            config[sensor]['new_dem_image_file'],
+                            config[sensor]['igm_image_file'],
+                            config[sensor]['new_imugps_file'])
             logger.info('Plot %s-sensor angle geometry.' %(sensor.upper()))
             config[sensor]['angle_geometry_figure_file'] = os.path.join(config[sensor]['output_dir'], basename+'_AngleGeometry.png')
-#            plot_angle_geometry(config[sensor]['angle_geometry_figure_file'],
-#                                config[sensor]['sca_image_file'])
+            plot_angle_geometry(config[sensor]['angle_geometry_figure_file'],
+                                config[sensor]['sca_image_file'])
 
         logger.info('Make atmoshperic LUT.')
         config['atm_lut_dir'] = os.path.join(config['output_dir'], 'atm_lut')
@@ -177,26 +175,25 @@ class HypexPro():
             logger.info('Build %s-sensor mask.' %(sensor.upper()))
             basename = os.path.basename(config[sensor]['raw_imugps_file'][:-len('_raw.txt')])
             config[sensor]['mask_image_file'] = os.path.join(config[sensor]['output_dir'], basename+'_Mask')
-#            build_mask(config[sensor]['mask_image_file'],
-#                       config[sensor]['raw_image_file'],
-#                       config[sensor]['setting_file'],
-#                       config['sun_angles'][0])
+            build_mask(config[sensor]['mask_image_file'],
+                       config[sensor]['raw_image_file'],
+                       config[sensor]['setting_file'],
+                       config['sun_angles'][0])
             logger.info('Build %s-sensor WVC model.' %(sensor.upper()))
 
             config[sensor]['wvc_model_file'] = os.path.join(config[sensor]['output_dir'], basename+'_WVCModel.txt')
-#            build_wvc_model(config[sensor]['wvc_model_file'],
-#                            config['atm_lut_file'],
-#                            os.path.splitext(config[sensor]['raw_image_file'])[0]+'.hdr',
-#                            config[sensor]['setting_file'])
-
+            build_wvc_model(config[sensor]['wvc_model_file'],
+                            config['atm_lut_file'],
+                            os.path.splitext(config[sensor]['raw_image_file'])[0]+'.hdr',
+                            config[sensor]['setting_file'])
             config[sensor]['wvc_model_figure_file'] = os.path.join(config[sensor]['output_dir'], basename+'_WVCModel.png')
-#            plot_wvc_model(config[sensor]['wvc_model_figure_file'],
-#                           config[sensor]['wvc_model_file'])
+            plot_wvc_model(config[sensor]['wvc_model_figure_file'],
+                           config[sensor]['wvc_model_file'])
 
             config[sensor]['smile_image_file'] = os.path.join(config[sensor]['output_dir'], basename+'_Smile')
             return (config[sensor], config['atm_lut_file'], config['sun_angles'])
-#            remove_smile_effect(config[sensor],
-#                                config['sun_angles'][0])
+            remove_smile_effect(config[sensor],
+                                config['sun_angles'][0])
         raise IOError('sssssssssss')
 
 config_file = './config.json'
